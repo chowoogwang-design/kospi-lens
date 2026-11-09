@@ -1,0 +1,67 @@
+name: Refresh and publish screener
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+  schedule:
+    # 19:00 KST = 10:00 UTC. Monday-Friday; publishes the most recently available trading session.
+    - cron: '0 10 * * 1-5'
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+concurrency:
+  group: pages
+  cancel-in-progress: false
+jobs:
+  build-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Retrieve last published financial snapshot cache
+        uses: actions/cache/restore@v4
+        with:
+          path: data/cache
+          key: dart-cache-${{ github.run_id }}
+          restore-keys: |
+            dart-cache-
+      - name: Refresh using official APIs
+        if: github.event_name != 'push'
+        env:
+          KRX_API_KEY: ${{ secrets.KRX_API_KEY }}
+          DART_API_KEY: ${{ secrets.DART_API_KEY }}
+        run: |
+          python -m app.refresh --live
+          cp data/snapshot.json site/data/stocks.json
+      - name: Store financial statement cache
+        if: github.event_name != 'push' && success()
+        uses: actions/cache/save@v4
+        with:
+          path: data/cache
+          key: dart-cache-${{ github.run_id }}
+      - name: Validate generated data
+        run: |
+          python - <<'PYCODE'
+          import json
+          from pathlib import Path
+          d=json.loads(Path('site/data/stocks.json').read_text())
+          assert isinstance(d.get('companies'),list)
+          if '${{ github.event_name }}' != 'push':
+              assert d.get('mode') == 'live' and not d.get('partial') and len(d['companies']) > 0
+          print('Rows:',len(d['companies']))
+          PYCODE
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./site
+      - id: deployment
+        uses: actions/deploy-pages@v4
